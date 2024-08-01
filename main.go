@@ -3,11 +3,13 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -19,21 +21,23 @@ import (
 )
 
 const (
-	owner      = "projectdiscovery"
-	repo       = "nuclei-templates"
-	checkDelay = 1 * time.Minute
+	owner = "projectdiscovery"
+	repo  = "nuclei-templates"
 )
 
 var (
-	silent bool
-	logger *log.Logger
+	silent     bool
+	logger     *log.Logger
+	httpClient *http.Client
 )
 
 func main() {
 	var filename string
 	var downloadDir string
+	var proxyURL string
 	flag.StringVar(&filename, "file", "cve_titles.txt", "Filename to store CVE titles")
 	flag.StringVar(&downloadDir, "dir", "", "Directory to download YAML files (optional)")
+	flag.StringVar(&proxyURL, "proxy", "", "HTTP proxy URL (optional)")
 	flag.BoolVar(&silent, "silent", false, "Silent mode: don't print anything")
 	flag.Parse()
 
@@ -48,42 +52,53 @@ func main() {
 		logger.Fatal("GITHUB_TOKEN environment variable not set")
 	}
 
+	// Set up HTTP client with proxy and TLS config
+	httpClient = &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+
+	if proxyURL != "" {
+		proxyURLParsed, err := url.Parse(proxyURL)
+		if err != nil {
+			logger.Fatalf("Invalid proxy URL: %v", err)
+		}
+		httpClient.Transport.(*http.Transport).Proxy = http.ProxyURL(proxyURLParsed)
+	}
+
 	ctx := context.Background()
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
 	tc := oauth2.NewClient(ctx, ts)
+	tc.Transport = httpClient.Transport
 	client := github.NewClient(tc)
 
 	existingCVEs := loadExistingCVEs(filename)
 	isFirstRun := len(existingCVEs) == 0
 
-	for {
-		newCVEs, err := fetchNewCVEs(ctx, client, isFirstRun, existingCVEs)
+	newCVEs, err := fetchNewCVEs(ctx, client, isFirstRun, existingCVEs)
+	if err != nil {
+		logger.Fatalf("Error fetching new CVEs: %v", err)
+	}
+
+	if len(newCVEs) > 0 {
+		err = appendToFile(filename, newCVEs)
 		if err != nil {
-			logger.Printf("Error fetching new CVEs: %v", err)
-			time.Sleep(checkDelay)
-			continue
+			logger.Printf("Error appending to file: %v", err)
 		}
 
-		if len(newCVEs) > 0 {
-			err = appendToFile(filename, newCVEs)
-			if err != nil {
-				logger.Printf("Error appending to file: %v", err)
-			}
-
-			if downloadDir != "" {
-				for _, cve := range newCVEs {
-					err = downloadYAMLFiles(ctx, client, cve, downloadDir)
-					if err != nil {
-						logger.Printf("Error downloading YAML files for %s: %v", cve, err)
-					}
+		if downloadDir != "" {
+			for _, cve := range newCVEs {
+				err = downloadYAMLFiles(ctx, client, cve, downloadDir)
+				if err != nil {
+					logger.Printf("Error downloading YAML files for %s: %v", cve, err)
 				}
 			}
-
-			existingCVEs = append(existingCVEs, newCVEs...)
 		}
+	}
 
-		isFirstRun = false
-		time.Sleep(checkDelay)
+	if !silent {
+		logger.Printf("Finished processing. Found %d new CVEs.", len(newCVEs))
 	}
 }
 
@@ -181,7 +196,7 @@ func downloadYAMLFiles(ctx context.Context, client *github.Client, cve, download
 		ListOptions: github.ListOptions{PerPage: 100},
 	}
 
-	query := fmt.Sprintf("repo:%s/%s filename:%s.yaml", owner, repo, cve)
+	query := fmt.Sprintf("repo:%s/%s filename:%s.yaml path:cves", owner, repo, cve)
 	for {
 		result, resp, err := client.Search.Code(ctx, query, opt)
 		if err != nil {
@@ -212,7 +227,7 @@ func downloadYAMLFiles(ctx context.Context, client *github.Client, cve, download
 }
 
 func downloadFile(url, filePath string) error {
-	resp, err := http.Get(url)
+	resp, err := httpClient.Get(url)
 	if err != nil {
 		return err
 	}
