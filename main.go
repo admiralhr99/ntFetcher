@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/tls"
 	"flag"
@@ -32,11 +31,9 @@ var (
 )
 
 func main() {
-	var filename string
 	var downloadDir string
 	var proxyURL string
-	flag.StringVar(&filename, "file", "cve_titles.txt", "Filename to store CVE titles")
-	flag.StringVar(&downloadDir, "dir", "", "Directory to download YAML files (optional)")
+	flag.StringVar(&downloadDir, "dir", ".", "Directory to download YAML files (default: current directory)")
 	flag.StringVar(&proxyURL, "proxy", "", "HTTP proxy URL (optional)")
 	flag.BoolVar(&silent, "silent", false, "Silent mode: don't print anything")
 	flag.Parse()
@@ -73,59 +70,27 @@ func main() {
 	tc.Transport = httpClient.Transport
 	client := github.NewClient(tc)
 
-	existingCVEs := loadExistingCVEs(filename)
-	isFirstRun := len(existingCVEs) == 0
-
-	newCVEs, err := fetchNewCVEs(ctx, client, isFirstRun, existingCVEs)
+	newCVEs, err := fetchNewCVEs(ctx, client)
 	if err != nil {
 		logger.Fatalf("Error fetching new CVEs: %v", err)
 	}
 
-	if len(newCVEs) > 0 {
-		err = appendToFile(filename, newCVEs)
+	downloadedCount := 0
+	for _, cve := range newCVEs {
+		err = downloadYAMLFiles(ctx, client, cve, downloadDir)
 		if err != nil {
-			logger.Printf("Error appending to file: %v", err)
-		}
-
-		if downloadDir != "" {
-			for _, cve := range newCVEs {
-				err = downloadYAMLFiles(ctx, client, cve, downloadDir)
-				if err != nil {
-					logger.Printf("Error downloading YAML files for %s: %v", cve, err)
-				}
-			}
+			logger.Printf("Error downloading YAML files for %s: %v", cve, err)
+		} else {
+			downloadedCount++
 		}
 	}
 
 	if !silent {
-		logger.Printf("Finished processing. Found %d new CVEs.", len(newCVEs))
+		logger.Printf("Finished processing. Downloaded YAML files for %d new CVEs.", downloadedCount)
 	}
 }
 
-func loadExistingCVEs(filename string) []string {
-	file, err := os.Open(filename)
-	if err != nil {
-		return []string{}
-	}
-	defer file.Close()
-
-	var cves []string
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		if cve := extractCVE(scanner.Text()); cve != "" {
-			cves = append(cves, cve)
-		}
-	}
-	return cves
-}
-
-func extractCVE(title string) string {
-	re := regexp.MustCompile(`CVE-\d{4}-\d+`)
-	match := re.FindString(title)
-	return match
-}
-
-func fetchNewCVEs(ctx context.Context, client *github.Client, isFirstRun bool, existingCVEs []string) ([]string, error) {
+func fetchNewCVEs(ctx context.Context, client *github.Client) ([]string, error) {
 	var newCVEs []string
 	oneMonthAgo := time.Now().AddDate(0, -1, 0)
 
@@ -151,9 +116,8 @@ func fetchNewCVEs(ctx context.Context, client *github.Client, isFirstRun bool, e
 
 			if strings.Contains(strings.ToLower(pr.GetTitle()), "cve") {
 				cve := extractCVE(pr.GetTitle())
-				if cve != "" && !contains(existingCVEs, cve) {
+				if cve != "" {
 					newCVEs = append(newCVEs, cve)
-					logger.Printf("New CVE template: %s (#%d)\n", pr.GetTitle(), pr.GetNumber())
 				}
 			}
 		}
@@ -167,28 +131,10 @@ func fetchNewCVEs(ctx context.Context, client *github.Client, isFirstRun bool, e
 	return newCVEs, nil
 }
 
-func contains(slice []string, item string) bool {
-	for _, a := range slice {
-		if a == item {
-			return true
-		}
-	}
-	return false
-}
-
-func appendToFile(filename string, cves []string) error {
-	file, err := os.OpenFile(filename, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	for _, cve := range cves {
-		if _, err := file.WriteString(cve + "\n"); err != nil {
-			return err
-		}
-	}
-	return nil
+func extractCVE(title string) string {
+	re := regexp.MustCompile(`CVE-\d{4}-\d+`)
+	match := re.FindString(title)
+	return match
 }
 
 func downloadYAMLFiles(ctx context.Context, client *github.Client, cve, downloadDir string) error {
