@@ -1,161 +1,233 @@
 package main
 
 import (
-	"encoding/json"
+	"bufio"
+	"context"
 	"flag"
 	"fmt"
-	"gopkg.in/yaml.v2"
-	"io/ioutil"
+	"io"
+	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
+
+	"github.com/google/go-github/v38/github"
+	"golang.org/x/oauth2"
 )
 
-type PullRequest struct {
-	ID     int    `json:"id"`
-	Number int    `json:"number"`
-	Title  string `json:"title"`
-	User   struct {
-		Login string `json:"login"`
-	} `json:"user"`
-	HTMLURL string `json:"html_url"`
+const (
+	owner      = "projectdiscovery"
+	repo       = "nuclei-templates"
+	checkDelay = 1 * time.Minute
+)
+
+var (
+	silent bool
+	logger *log.Logger
+)
+
+func main() {
+	var filename string
+	var downloadDir string
+	flag.StringVar(&filename, "file", "cve_titles.txt", "Filename to store CVE titles")
+	flag.StringVar(&downloadDir, "dir", "", "Directory to download YAML files (optional)")
+	flag.BoolVar(&silent, "silent", false, "Silent mode: don't print anything")
+	flag.Parse()
+
+	if silent {
+		logger = log.New(io.Discard, "", 0)
+	} else {
+		logger = log.New(os.Stdout, "", log.LstdFlags)
+	}
+
+	token := os.Getenv("GITHUB_TOKEN")
+	if token == "" {
+		logger.Fatal("GITHUB_TOKEN environment variable not set")
+	}
+
+	ctx := context.Background()
+	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
+	tc := oauth2.NewClient(ctx, ts)
+	client := github.NewClient(tc)
+
+	existingCVEs := loadExistingCVEs(filename)
+	isFirstRun := len(existingCVEs) == 0
+
+	for {
+		newCVEs, err := fetchNewCVEs(ctx, client, isFirstRun, existingCVEs)
+		if err != nil {
+			logger.Printf("Error fetching new CVEs: %v", err)
+			time.Sleep(checkDelay)
+			continue
+		}
+
+		if len(newCVEs) > 0 {
+			err = appendToFile(filename, newCVEs)
+			if err != nil {
+				logger.Printf("Error appending to file: %v", err)
+			}
+
+			if downloadDir != "" {
+				for _, cve := range newCVEs {
+					err = downloadYAMLFiles(ctx, client, cve, downloadDir)
+					if err != nil {
+						logger.Printf("Error downloading YAML files for %s: %v", cve, err)
+					}
+				}
+			}
+
+			existingCVEs = append(existingCVEs, newCVEs...)
+		}
+
+		isFirstRun = false
+		time.Sleep(checkDelay)
+	}
 }
 
-type Commit struct {
-	SHA     string `json:"sha"`
-	HTMLURL string `json:"html_url"`
-	Commit  struct {
-		Message string `json:"message"`
-	} `json:"commit"`
+func loadExistingCVEs(filename string) []string {
+	file, err := os.Open(filename)
+	if err != nil {
+		return []string{}
+	}
+	defer file.Close()
+
+	var cves []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		if cve := extractCVE(scanner.Text()); cve != "" {
+			cves = append(cves, cve)
+		}
+	}
+	return cves
 }
 
-type PRInfo struct {
-	PullRequest PullRequest `yaml:"pull_request"`
-	Commits     []Commit    `yaml:"commits"`
+func extractCVE(title string) string {
+	re := regexp.MustCompile(`CVE-\d{4}-\d+`)
+	match := re.FindString(title)
+	return match
 }
 
-func getPullRequests(apiURL, githubToken string) ([]PullRequest, error) {
-	client := &http.Client{}
-	req, err := http.NewRequest("GET", apiURL, nil)
-	if err != nil {
-		return nil, err
+func fetchNewCVEs(ctx context.Context, client *github.Client, isFirstRun bool, existingCVEs []string) ([]string, error) {
+	var newCVEs []string
+	oneMonthAgo := time.Now().AddDate(0, -1, 0)
+
+	opt := &github.PullRequestListOptions{
+		State:     "all",
+		Sort:      "updated",
+		Direction: "desc",
+		ListOptions: github.ListOptions{
+			PerPage: 100,
+		},
 	}
 
-	req.Header.Add("Authorization", "token "+githubToken)
-	req.Header.Add("Accept", "application/vnd.github.v3+json")
+	for {
+		prs, resp, err := client.PullRequests.List(ctx, owner, repo, opt)
+		if err != nil {
+			return nil, err
+		}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
+		for _, pr := range prs {
+			if pr.GetUpdatedAt().Before(oneMonthAgo) {
+				return newCVEs, nil
+			}
+
+			if strings.Contains(strings.ToLower(pr.GetTitle()), "cve") {
+				cve := extractCVE(pr.GetTitle())
+				if cve != "" && !contains(existingCVEs, cve) {
+					newCVEs = append(newCVEs, cve)
+					logger.Printf("New CVE template: %s (#%d)\n", pr.GetTitle(), pr.GetNumber())
+				}
+			}
+		}
+
+		if resp.NextPage == 0 {
+			break
+		}
+		opt.Page = resp.NextPage
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("error fetching pull requests: %d", resp.StatusCode)
-	}
-
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	var pullRequests []PullRequest
-	err = json.Unmarshal(body, &pullRequests)
-	if err != nil {
-		return nil, err
-	}
-
-	return pullRequests, nil
+	return newCVEs, nil
 }
 
-func getCommits(commitsURL, githubToken string) ([]Commit, error) {
-	client := &http.Client{}
-	req, err := http.NewRequest("GET", commitsURL, nil)
-	if err != nil {
-		return nil, err
+func contains(slice []string, item string) bool {
+	for _, a := range slice {
+		if a == item {
+			return true
+		}
 	}
-
-	req.Header.Add("Authorization", "token "+githubToken)
-	req.Header.Add("Accept", "application/vnd.github.v3+json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("error fetching commits: %d", resp.StatusCode)
-	}
-
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	var commits []Commit
-	err = json.Unmarshal(body, &commits)
-	if err != nil {
-		return nil, err
-	}
-
-	return commits, nil
+	return false
 }
 
-func savePRInfo(pr PullRequest, commits []Commit) error {
-	prInfo := PRInfo{
-		PullRequest: pr,
-		Commits:     commits,
-	}
-
-	data, err := yaml.Marshal(&prInfo)
+func appendToFile(filename string, cves []string) error {
+	file, err := os.OpenFile(filename, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
 	if err != nil {
 		return err
 	}
+	defer file.Close()
 
-	filename := fmt.Sprintf("PR-%d.yaml", pr.Number)
-	return ioutil.WriteFile(filename, data, 0644)
-}
-
-func main() {
-	apiURL := flag.String("api-url", "", "GitHub API URL for pull requests")
-	flag.Parse()
-
-	if *apiURL == "" {
-		fmt.Println("Error: API URL is required. Use --api-url flag.")
-		flag.PrintDefaults()
-		os.Exit(1)
-	}
-
-	githubToken := os.Getenv("GITHUB_TOKEN")
-	if githubToken == "" {
-		fmt.Println("Error: GITHUB_TOKEN environment variable is not set.")
-		os.Exit(1)
-	}
-
-	pullRequests, err := getPullRequests(*apiURL, githubToken)
-	if err != nil {
-		fmt.Printf("Error fetching pull requests: %v\n", err)
-		return
-	}
-
-	for _, pr := range pullRequests {
-		if strings.Contains(strings.ToUpper(pr.Title), "CVE") {
-			fmt.Printf("Found CVE in PR #%d: %s\n", pr.Number, pr.Title)
-
-			commitsURL := strings.Replace(*apiURL, "pulls", fmt.Sprintf("pulls/%d/commits", pr.Number), 1)
-			commits, err := getCommits(commitsURL, githubToken)
-			if err != nil {
-				fmt.Printf("Error fetching commits for PR #%d: %v\n", pr.Number, err)
-				continue
-			}
-
-			err = savePRInfo(pr, commits)
-			if err != nil {
-				fmt.Printf("Error saving PR info for PR #%d: %v\n", pr.Number, err)
-			} else {
-				fmt.Printf("Saved PR info for PR #%d\n", pr.Number)
-			}
+	for _, cve := range cves {
+		if _, err := file.WriteString(cve + "\n"); err != nil {
+			return err
 		}
 	}
+	return nil
+}
+
+func downloadYAMLFiles(ctx context.Context, client *github.Client, cve, downloadDir string) error {
+	opt := &github.SearchOptions{
+		ListOptions: github.ListOptions{PerPage: 100},
+	}
+
+	query := fmt.Sprintf("repo:%s/%s filename:%s.yaml", owner, repo, cve)
+	for {
+		result, resp, err := client.Search.Code(ctx, query, opt)
+		if err != nil {
+			return err
+		}
+
+		for _, file := range result.CodeResults {
+			downloadURL := file.GetHTMLURL()
+			downloadURL = strings.Replace(downloadURL, "github.com", "raw.githubusercontent.com", 1)
+			downloadURL = strings.Replace(downloadURL, "/blob/", "/", 1)
+
+			localPath := filepath.Join(downloadDir, filepath.Base(file.GetName()))
+			err := downloadFile(downloadURL, localPath)
+			if err != nil {
+				logger.Printf("Error downloading file %s: %v", file.GetName(), err)
+			} else if !silent {
+				logger.Printf("Successfully downloaded: %s", localPath)
+			}
+		}
+
+		if resp.NextPage == 0 {
+			break
+		}
+		opt.Page = resp.NextPage
+	}
+
+	return nil
+}
+
+func downloadFile(url, filePath string) error {
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("bad status: %s", resp.Status)
+	}
+
+	out, err := os.Create(filePath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, resp.Body)
+	return err
 }
