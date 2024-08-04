@@ -11,11 +11,11 @@ ntfetcher is a Go application designed to fetch and track new CVE-related pull r
 
 1. Ensure you have Go installed on your system. If not, download and install it from [golang.org](https://golang.org/).
 
-2. Clone this repository:
+2. Clone this repository
 
-3. cd ntFetcher
+3. `cd ntFetcher`
 
-4. go run main.go -download
+4. `go run main.go -download`
 
 
 ### Examples
