@@ -1,6 +1,6 @@
 # ntFetcher: Nuclei Templates Pull Request Fetcher
 
-ntfetcher is a Go application designed to fetch and track new CVE-related pull requests from the [projectdiscovery/nuclei-templates](https://github.com/projectdiscovery/nuclei-templates) repository. It helps security researchers and developers stay up-to-date with the latest CVE templates.
+ntFetcher is a Go application designed to fetch and track new CVE-related pull requests from the [projectdiscovery/nuclei-templates](https://github.com/projectdiscovery/nuclei-templates) repository. It helps security researchers and developers stay up-to-date with the latest CVE templates.
 
 ## Features
 
