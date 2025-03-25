@@ -21,6 +21,7 @@ import (
 )
 
 // Version information
+// git tag -a v0.2.0 -m "v0.2.0"
 const (
 	Version = "0.2.0"
 )
