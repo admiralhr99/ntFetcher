@@ -16,7 +16,7 @@ ntFetcher is a Go application designed to fetch and track new CVE-related pull r
 ### Using Go Install
 
 ```bash
-go install github.com/admiralhr99/ntFetcher@v0.2.0
+go install github.com/admiralhr99/ntFetcher@latest
 ```
 
 ### From Source
@@ -91,5 +91,7 @@ ntFetcher -silent | notify
 
 ## Version History
 
+- v0.2.2: fix -update bug
+- v0.2.1: edit update message
 - v0.2.0: Added continuous mode, custom download directory, self-update functionality
 - v0.1.0: Initial release

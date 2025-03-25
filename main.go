@@ -64,7 +64,7 @@ func main() {
 	}
 
 	if *update {
-		checkForUpdates(owner)
+		checkForUpdates()
 		return
 	}
 
@@ -385,20 +385,33 @@ func shouldUpdateFile(filename string, remoteContent []byte) bool {
 }
 
 // checkForUpdates checks GitHub for a newer version of ntFetcher
-func checkForUpdates(username string) {
+func checkForUpdates() {
 	// Change this to your repository name
 	repoName := "ntFetcher"
 
 	fmt.Println("Checking for updates...")
 
 	// Construct the URL to check for releases
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", username, repoName)
+	url := fmt.Sprintf("https://api.github.com/repos/admiralhr99/%s/releases/latest", repoName)
 
-	resp, err := http.Get(url)
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		fmt.Printf("Error creating request: %v\n", err)
+		return
+	}
+
+	// Add a user agent to avoid GitHub API rate limiting
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36")
+
+	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Printf("Error checking for updates: %v\n", err)
 		return
 	}
+
+	//body, _ := io.ReadAll(resp.Body)
+	//fmt.Printf("Response: %s\n", string(body))
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
@@ -419,10 +432,25 @@ func checkForUpdates(username string) {
 		} `json:"assets"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		fmt.Printf("Error parsing release information: %v\n", err)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf("Error reading response body: %v\n", err)
 		return
 	}
+
+	if err := json.Unmarshal(body, &release); err != nil {
+		fmt.Printf("Error parsing release information: %v\n", err)
+		fmt.Printf("Response body: %s\n", string(body))
+		return
+	}
+
+	if release.TagName == "" {
+		fmt.Println("Unable to determine remote version - no tag found in release")
+		fmt.Printf("Response body: %s\n", string(body))
+		return
+	}
+
+	fmt.Printf("Latest release on GitHub: %s\n", release.TagName)
 
 	// Remove 'v' prefix if present for comparison
 	remoteVersion := strings.TrimPrefix(release.TagName, "v")
