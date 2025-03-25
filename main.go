@@ -21,9 +21,9 @@ import (
 )
 
 // Version information
-// git tag -a v0.2.0 -m "v0.2.0"
+
 const (
-	Version = "0.2.0"
+	Version = "0.2.1"
 )
 
 type PullRequest struct {
@@ -403,7 +403,7 @@ func checkForUpdates(username string) {
 
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusNotFound {
-			fmt.Println("No releases found. You might need to create your first GitHub release.")
+			fmt.Println("No new releases found.")
 			return
 		}
 		fmt.Printf("Error checking for updates: HTTP status %d\n", resp.StatusCode)
